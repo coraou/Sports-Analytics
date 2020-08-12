@@ -1,0 +1,1455 @@
+---
+title: "Exploratory Data Analytics and Visualization- HW1"
+author: "Team 12"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+  html_document:
+    df_print: paged
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# The Business Problem and Our Approach
+
+## Our Task
+
+AS Roma, a prestigious club in Italian football has turned to data to help them gain an edge over rivals in the race to win top spot of the Serie A league. To that end, we have been hired by AS Roma to be their resident data scientist group. The coach of the team wants us to find patterns that he can exploit to increase success on the field and decrease failure. While allowed to use any tools and techniques that can bring AS Roma valuable insights into how better they may compete, the coach is keen that association rules play a part of our analysis.
+
+
+## Defining Success
+
+Roma is an ambitious club that has set its sight on the top 3 league spots and nothing less. The club strictly defines success as consisting of purely wins. Draws are viewed unfavorably, almost as bad as a loss.
+
+
+## Key Question
+
+The key question of our analysis is what strategy Roma can take to defeat AC Milan. Across all the years of match data (2008/09-2012/13), AC Milan is the team we find the next hardest to win against, only after Juventus. Our reason for choosing to focus on AC Milan rather than Juventus is that Roma has a very low match win rate (only around 18%) against Juventus.The next four to five teams that Roma finds hard to beat lose between 30-40% of the matches played against Roma, AC Milan being at 31%. Thus, it is fairly evident that Juventus could be a lot harder to beat than AC Milan. Irrespective of the team Roma wins against, the same 3 points are up for grabs. Hence it makes more sense to target AC Milan.
+
+Since this data science approach to supplementing game strategy is new to Roma, they would like to see the results against one opponent, before placing all their faith in the process blindly. If the results are positive, such an analysis can be extended to the other teams Roma wants to focus next on defeating.
+
+An assumption we hold all through the analysis is that Roma has currently just begun a domestic season and transferring of players in-and-out of the club is not a possibility. With this assumption we limit the focus of our analysis to strategies AS Roma can adopt to maximize wins using only their current squad. 
+
+## Our Approach
+
+We first looked at players who have played against AC Milan. More specifically, we first classified players (excluding goalkeepers) into three types-defenders, attackers and midfielders. Then using clustering, we subgrouped these three types of players. In order to devise strategies for Roma, a team weaker than AC Milan, we looked at matches where AC Milan has lost to its weaker teams. We not only looked at what types of players were involved in those matches, but their formations. By doing so, we attempted to find out nonobvious patterns of players and their formations that have defeated AC Milan. Lastly, based on Roma's own situation, we offered recommendations.   
+
+
+
+# Data Cleaning
+
+
+Load Dependencies
+
+```{r include=FALSE}
+
+library(dplyr)
+library(magrittr)
+library(tidyverse)
+library(ggplot2)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(dbplyr)
+library(xml2)
+library(naniar)
+library(hash)
+library(plyr)   
+library(purrr)
+library(arules)
+library(arulesViz)
+library(cluster)
+library(fmsb)
+library(RColorBrewer)
+library(scales)
+library(clue)
+library(reshape2)
+```
+
+Load datasets
+
+```{r include = FALSE}
+
+con <- src_sqlite("euro_soccer.sqlite")
+
+long_team_name <- 'Roma'
+#each of the followint tables are just dplyr connections to the database tables
+#if or when I need to bring the table to local memory I need to run table <- collect(table)
+country_tbl <- tbl(con, "country")
+league_tbl <- tbl(con, "league")
+match_tbl <- tbl(con, "match")
+player_tbl <- tbl(con, "player")
+player_atts_tbl <- tbl(con, "player_attributes")
+team_tbl <- tbl(con, "team")
+team_atts_tbl <- tbl(con, "team_attributes")
+
+country <- country_tbl %>% collect()
+league <- league_tbl %>% collect()
+match <- match_tbl %>% collect()
+player <- player_tbl %>% collect()
+player_atts <- player_atts_tbl %>% collect()
+team <- team_tbl %>% collect()
+team_atts <- team_atts_tbl %>% collect()
+
+
+roma_record <- team_tbl %>% 
+                collect() %>%
+                filter(grepl(long_team_name, team_long_name))
+
+```
+
+## Check Missing values
+
+There are a total of seven tables in the database. We first look at how many missing values are there in each table.
+
+```{r}
+head(miss_var_summary(country))
+head(miss_var_summary(league))
+head(miss_var_summary(player))
+head(miss_var_summary(team))
+head(miss_var_summary(team_atts))
+```
+
+For country, league and player tables, there are no missing values; And for the team table, there are a small number of missing values in team_fifa_api_id. But in this analysis, team_fifa_api_id is not used, so we just keep the table as it is; And for the team attributes table, there are a large number of missing values in buildUpPlayDribbling. 
+
+```{r}
+head(miss_var_summary(match))
+head(miss_var_summary(player_atts))
+```
+For match table, there are a large number of missing values across the table; For player table, each column has a small amount of missing data.
+
+## Data Exploration
+
+### Define our target matches
+
+As it is only meaningful for Roma to form special strategies against its stronger teams. Here we tried to find out a list of teams that are stronger than Roma in Italian Serie A league. We calculated the win rates of Roma against other teams in the Italian Serie A league. We defined stronger teams as the ones whom Roma has win rate of over 50%.
+
+```{r}
+
+italian_league_id <- (league_tbl %>% collect() %>% filter(name=="Italy Serie A"))$id
+
+#all italian matches
+italian_matches <- match_tbl %>% collect() %>% filter(country_id==italian_league_id)
+
+#matches where Roma was home team
+roma_home_matches <- italian_matches %>% filter(home_team_api_id==roma_record$team_api_id)
+
+
+#matches where Roma was away team
+roma_away_matches <- italian_matches %>% filter(away_team_api_id==roma_record$team_api_id)
+
+
+temp <- roma_home_matches %>% 
+  select(home_team_api_id, away_team_api_id, home_team_goal, away_team_goal)
+
+temp <-temp %>% 
+  mutate(res = ifelse(home_team_goal>away_team_goal, "home",ifelse(home_team_goal<away_team_goal,"away","tie"))) %>%
+  select(home_team_api_id, away_team_api_id, home_team_goal, away_team_goal, res)
+
+# determine the matches won by Roma as a home team
+temp_1 <-temp %>% 
+  mutate(res = ifelse(home_team_goal>away_team_goal, 1,ifelse(home_team_goal<away_team_goal,0,0))) %>%
+  select(home_team_api_id, away_team_api_id, home_team_goal, away_team_goal, res)
+
+# determine the matches won by Roma as an away team
+
+temp_2 <-roma_away_matches %>% 
+  mutate(res = ifelse(home_team_goal>away_team_goal, 0,ifelse(home_team_goal<away_team_goal,1,0))) %>%
+  select(home_team_api_id, away_team_api_id, home_team_goal, away_team_goal, res)
+
+# merge the two dataframes to a dataset where Roma has won
+roma_data <- rbind(temp_1,temp_2)
+
+# create a column called "opposition" that contains the opposition team id
+roma_data["opposition"] = ifelse(roma_data$home_team_api_id==roma_record$team_api_id,roma_data$away_team_api_id, roma_data$home_team_api_id)
+
+#insert team_tbl in a dataframe
+teams <- team_tbl %>% collect()
+
+
+# merge Teams table to get the opposition team name corresponding to its id
+roma_data <- merge(x=roma_data, y=teams, by.x=c("opposition"), by.y=c("team_api_id"))
+
+# fetch only the columns that are necessary
+t <- roma_data %>% select(home_team_api_id, away_team_api_id, home_team_goal, away_team_goal, res, team_long_name)
+
+# group teams on the basis of win percentage
+opposition <- t %>% group_by(team_long_name) %>% 
+  dplyr::summarise(games_played = n(), games_won = sum(res),win_pct = mean(res)) %>%
+  arrange(win_pct)
+
+# Create strong and weak opposition dataframes
+opposition_str <- opposition %>% filter(win_pct <= 0.5 & games_played >= 8)
+opposition_wk <- opposition %>% filter(win_pct > 0.5 & games_played >= 8)
+
+ggplot(opposition_str , aes(x = reorder(team_long_name, win_pct, sum), y = win_pct ) ) + 
+  geom_col(width = 0.4, fill = "navyblue")+
+  labs(x = "Teams", y = "Win Percentage",fill = "League Names")+
+  ggtitle("Teams by Win Percentage")
+
+#write.csv(opposition_str, "Roma_oppos_str_domestic.csv")
+#write.csv(opposition_wk, "Roma_oppos_wk_domestic.csv")
+
+```
+
+We discovered that there are nine stronger teams. And the win rate of Roma against AC Milan is around 30%, making AC Milan a reasonable target for our analysis.
+
+
+## Data preparation for Analysis
+
+We first subsetted the matches where the stronger teams have lost domestically. Within those matches, we found the ones that are associated with AC Milan as our target matches for clustering. The output for this step is the attributes information of all players and player formation in the targeted matches.
+
+**Find the matches where the stronger teams have lost domestically **
+
+Total: 519 matches
+
+```{r include=FALSE}
+
+
+# Find out ids of stronger teams
+
+# Find out ids of stronger teams
+opposition_str_info <- filter(teams, team_long_name %in% opposition_str$team_long_name)
+opposition_str_id <- opposition_str_info$team_api_id
+
+# Find out matches of those stronger teams where they lost
+stronger_team_home_matches <- match_tbl %>% 
+  collect() %>%
+  filter(home_team_api_id %in% opposition_str_id) %>%
+  mutate(res = ifelse(home_team_goal<away_team_goal, TRUE, FALSE)) %>%
+  filter(res == TRUE) %>%
+  select(match_api_id, ends_with('H'), ends_with('A'))
+
+stronger_team_away_matches <- match_tbl %>% 
+  collect() %>%
+  filter(away_team_api_id %in% opposition_str_id) %>%
+  mutate(res = ifelse(home_team_goal>away_team_goal, TRUE, FALSE)) %>%
+  filter(res == TRUE) %>%
+  select(match_api_id, ends_with('H'), ends_with('A'))
+
+
+# Calculate the average odds
+stronger_team_home_matches_h <- stronger_team_home_matches %>% 
+  select(match_api_id, ends_with('H'))
+stronger_team_home_matches_a <- stronger_team_home_matches %>% 
+  select(match_api_id, ends_with('A'))
+stronger_team_home_matches <- transform(stronger_team_home_matches, 
+                                        H_odds = rowMeans(stronger_team_home_matches_h[, -1], na.rm = TRUE),
+                                        A_odds = rowMeans(stronger_team_home_matches_a[, -1], na.rm = TRUE))
+
+stronger_home_matches_ids <- stronger_team_home_matches %>% 
+  filter(H_odds > A_odds) %>%
+  select(match_api_id)
+
+stronger_home_matches <- match %>% filter(match_api_id %in% stronger_home_matches_ids$match_api_id)
+
+
+
+stronger_team_away_matches_h <- stronger_team_away_matches %>% 
+  select(match_api_id, ends_with('H'))
+stronger_team_away_matches_a <- stronger_team_away_matches %>% 
+  select(match_api_id, ends_with('A'))
+stronger_team_away_matches <- transform(stronger_team_away_matches, 
+                                        H_odds = rowMeans(stronger_team_away_matches_h[, -1], na.rm = TRUE),
+                                        A_odds = rowMeans(stronger_team_away_matches_a[, -1], na.rm = TRUE))
+
+stronger_away_matches_ids <- stronger_team_away_matches %>% 
+  filter(H_odds < A_odds) %>%
+  select(match_api_id)
+
+stronger_matches_ids <- rbind(stronger_home_matches_ids,stronger_away_matches_ids) 
+
+stronger_team_matches_lost <- match_tbl %>%
+  collect() %>%
+  filter(match_api_id %in% stronger_matches_ids$match_api_id)
+
+#write.csv(stronger_team_matches_lost, "beatten_str_team_matches_domestic.csv")
+ 
+```
+
+
+
+**Add the formation info of each match where the stronger teams have lost domestically**
+
+Total: 519 matches
+
+```{r include=FALSE}
+
+#DETERMINE FORMATION FOR HOME TEAM
+#Create temporary dataframe with only home team Y values
+temp <- stronger_team_matches_lost[c(1,34:44)]
+myvector1 <- c()
+#populate myvector with formations
+for(row in 1:nrow(temp)) {
+  i=1
+  sample_vector1 = c()
+  for(col in 3:ncol(temp)) {
+    sample_vector1[i] <- as.integer(temp[row, col]) #home
+    i = i+1
+  }
+  myvector1 <- append(myvector1,paste(array(table(sample_vector1)), collapse = ''))
+}
+
+#add a column "home_formation" in temp
+new_df1 <- data.frame(myvector1)
+stronger_team_matches_lost["home_formation"] <- new_df1["myvector1"]
+
+
+# Repeat the same exercise for Away team
+
+#DETERMINE FORMATION FOR AWAY TEAM
+#Create temporary dataframe with only away team Y values
+temp <- stronger_team_matches_lost[c(1,45:55)]
+
+
+#create an empty vector to hold the formation
+myvector1 <- c()
+
+#populate myvector with formations
+for(row in 1:nrow(temp)) {
+  i=1
+  sample_vector1 = c()
+  for(col in 3:ncol(temp)) {
+    sample_vector1[i] <- as.integer(temp[row, col])
+    i = i+1
+  }
+  myvector1 <- append(myvector1,paste(array(table(sample_vector1)), collapse = ''))
+}
+
+#add a column "away formation" in temp
+new_df1 <- data.frame(myvector1)
+stronger_team_matches_lost["away_formation"] <- new_df1["myvector1"]
+
+#Create two new columns - home_items and away_items in "TTTformationD" format
+#where TTT is the team name
+#formation is the formation
+#D is the decision - W|L
+#These two columns will be used as antecedents
+
+#Create a new column for home team result
+stronger_team_matches_lost['home_team_result'] = ifelse(stronger_team_matches_lost$home_team_goal < stronger_team_matches_lost$away_team_goal,'L','W')
+#Create a new column for away team result
+stronger_team_matches_lost['away_team_result'] = ifelse(stronger_team_matches_lost$home_team_goal > stronger_team_matches_lost$away_team_goal,'L','W')
+
+new_df <- stronger_team_matches_lost[c(1, 116:119)]
+new_df$home_items <- paste(new_df$home_formation, new_df$home_team_result, sep='')
+new_df$away_items <- paste(new_df$away_formation, new_df$away_team_result, sep='')
+new_df = new_df[c(1,6,7)]
+
+
+stronger_team_matches_lost = merge(stronger_team_matches_lost,new_df, by = "id")
+
+
+```
+
+
+**Find out matches associated with AC Milan**
+
+Total: 74 matches
+
+```{r include=FALSE}
+
+
+# Find out all the matches associated with AC Milan
+acm_str_info <- filter(teams, team_long_name == 'Milan')
+acm_str_id <- acm_str_info$team_api_id
+acm_loss = stronger_team_matches_lost %>%
+  filter (home_team_api_id == acm_str_id | away_team_api_id == acm_str_id)
+
+target_match_id = acm_loss$match_api_id
+
+```
+
+
+**Find out the player attributes of opponent teams of AC Milan in the matches:**
+
+Total: 3531 player records
+
+```{r include=FALSE}
+
+################# for home matches ###################
+
+acm_home <- acm_loss %>%
+  filter(match_api_id %in% target_match_id) %>%
+  select(match_api_id, date, 67:77)
+
+# data-cleaning season
+seasons <- strsplit(acm_home$date, '-')
+season_ok <- lapply(seasons, `[[`, 1)
+acm_home$seasons <- season_ok
+
+# get height and weight of players
+acm_home_match <- acm_home %>% select(3:13)
+acm_home_unique <- unique(unlist(acm_home_match))
+
+acm_player_atts1 <- player %>%
+  filter(player_api_id %in% acm_home_unique) %>%
+  select(player_api_id, height, weight)
+
+acm_player_atts2 <- data.frame()
+
+for (year in 2008:2015){
+  acm_player_year <- acm_home %>% filter(seasons==year) %>% select(3:13)
+  acm_player_unique <- unique(unlist(acm_player_year))
+  acm_player_atts_temp <- player_atts %>% 
+    filter(str_detect(player_atts$date, as.character(year)) == TRUE) %>%
+    filter(player_api_id %in% acm_player_unique)
+  acm_player_atts2 <- rbind(acm_player_atts2, acm_player_atts_temp)
+}
+
+
+acm_player_home_atts <- join(acm_player_atts1, acm_player_atts2, type = "inner")
+
+# look at missing values
+miss_var_summary(acm_player_home_atts)
+
+
+
+################ for away matches #################
+acm_away <- match_tbl %>%
+  collect() %>%
+  filter(match_api_id %in% target_match_id) %>%
+  select(match_api_id, date, 56:66)
+
+# data-cleaning season
+seasons <- strsplit(acm_away$date, '-')
+season_ok <- lapply(seasons, `[[`, 1)
+acm_away$seasons <- season_ok
+
+acm_away_match <- acm_away %>% select(3:13)
+acm_away_unique <- unique(unlist(acm_away_match))
+
+# get height and weight of players
+acm_player_atts1 <- player %>%
+  filter(player_api_id %in% acm_away_unique) %>%
+  select(player_api_id, height, weight)
+
+acm_player_atts2 <- data.frame()
+
+for (year in 2008:2015){
+  acm_player_year <- acm_away %>% filter(seasons==year) %>% select(3:13)
+  acm_player_unique <- unique(unlist(acm_player_year))
+  acm_player_atts_temp <- player_atts %>% 
+    filter(str_detect(player_atts$date, as.character(year)) == TRUE) %>%
+    filter(player_api_id %in% acm_player_unique)
+  acm_player_atts2 <- rbind(acm_player_atts2, acm_player_atts_temp)
+}
+
+acm_player_away_atts <- join(acm_player_atts1, acm_player_atts2, type = "inner")
+
+# drop missing values of the data frame
+miss_var_summary(acm_player_away_atts)
+acm_player_away_atts <- na.omit(acm_player_away_atts)
+
+acm_player_atts_all <- rbind(acm_player_home_atts, acm_player_away_atts)
+
+# drop dupliate columns
+acm_player_atts_all <- distinct(acm_player_atts_all)
+
+# drop some categorical columns as k-means clustering can only be applied to numerical features
+
+acm_player_atts_all <- acm_player_atts_all %>%
+  select(-c("id","player_fifa_api_id", "preferred_foot":"defensive_work_rate"))
+
+```
+
+
+**Get player roles of the winning teams in the matches where AC Milan has lost domestically:**
+
+Total: 410 unique players
+
+```{r include=FALSE}
+
+
+######## Summarize the position info table #########
+# Create tables of Attackers, Defenders, Mid-fielders in those focused matches
+# From player table: Attackers: Y = 10; Mid-fielders: Y = 7; Defenders: Y = 3
+ 
+
+
+############################### For home loss (Interested in Away Player ID) #############
+acm_home_pos <- acm_loss %>%
+  filter(home_team_api_id == acm_str_id) %>%
+  select('away_player_Y2':'away_player_Y11')
+
+acm_home_id <- acm_loss %>%
+  filter(home_team_api_id == acm_str_id) %>%
+  select('away_player_2':'away_player_11')
+
+ply_pos <- function(col){
+  pos = cut(col, c(2,5,8,11))
+  levels(pos) = c("Defend","Mid","Attack")
+  return(pos)
+}
+
+acm_home_pos <- lapply(acm_home_pos, ply_pos)
+acm_home_pos <- as.data.frame(acm_home_pos)
+acm_gather_id <- gather(acm_home_id, key, player_id)
+acm_gather_pos <- gather(acm_home_pos, key, player_pos)
+acm_home_player_pos <- cbind(acm_gather_id$player_id, acm_gather_pos$player_pos)
+acm_home_player_pos <- as.data.frame(acm_home_player_pos)
+names(acm_home_player_pos) <- c('player_id', 'position')
+
+#write.csv(player_position_Juv_home,"player_position_home.csv",row.names=FALSE)
+
+
+############################### For away loss (Interested in Home Player ID) #############
+acm_away_pos <- acm_loss %>%
+  filter(away_team_api_id == acm_str_id) %>%
+  select('home_player_Y2':'home_player_Y11')
+
+acm_away_id <- acm_loss %>%
+  filter(away_team_api_id == acm_str_id) %>%
+  select('home_player_2':'home_player_11')
+
+acm_away_pos <- lapply(acm_away_pos, ply_pos)
+acm_away_pos <- as.data.frame(acm_away_pos)
+acm_gather_id <- gather(acm_away_id, key, player_id)
+acm_gather_pos <- gather(acm_away_pos, key, player_pos)
+acm_away_player_pos <- cbind(acm_gather_id$player_id, acm_gather_pos$player_pos)
+acm_away_player_pos <- as.data.frame(acm_away_player_pos)
+names(acm_away_player_pos) <- c('player_id', 'position')
+
+player_position_acm = rbind(acm_away_player_pos,acm_home_player_pos)
+player_position_acm = distinct(player_position_acm)
+#write.csv(player_position_juv,"player_position_winJuv.csv",row.names = FALSE)
+dim(player_position_acm)
+player_position_acm = player_position_acm[complete.cases(player_position_acm),]
+
+
+```
+
+
+**Final dataframe for clustering:**
+
+```{r include=FALSE}
+
+player_position = player_position_acm %>%
+  select(player_api_id = player_id, position)
+
+merged_data = merge(player_position_acm,acm_player_atts_all,by.x = "player_id",by.y = "player_api_id")
+
+merged_data <- na.omit(merged_data)
+
+
+```
+
+
+**Divide dataframe for clustering:**
+
+```{r include=FALSE}
+
+defend_acm = merged_data[merged_data$position =="Defend",]
+mid_acm = merged_data[merged_data$position =="Mid",]
+attack_acm = merged_data[merged_data$position =="Attack",]
+
+```
+
+
+
+
+# K-mean Clustering Modeling on Player Attributes 
+
+To understand the types of players Roma and the other teams have, we have decided to adopt a clustering approach, more specifically k-means clustering.
+
+*Description and Rationale for the Chosen Analysis*
+The goal of the clustering is to recognize non-obvious player attribute combinations in each position (attack, mid-field, and defense). The algorithm we chose is K-mean clustering, since it is able to aggregate collections of players based on their similarities. The dataset we used includes matches where different teams played against AC Milan. We are interested in players that showed up in those matches and classify them based on 35 attributes (e.g.: agility, shot-power and passing) they have. 
+
+## Train the model
+
+Using the elbow curve as a heuristic to decide on the appropriate number of clusters to have within each of the three roles (attackers, midfielders, and defenders), we arrive at 5 clusters within attackers, 8 clusters within midfielders, and 2 clusters within defenders. AS Roma has players belonging only to a few of these clusters, and given that our focus is on Roma’s current season campaign, we assume that the overall squad cannot be changed drastically. We thus limit our focus to clusters that Roma already has players from, and identifying what clusters work best against AC Milan so that the coach may make selections from these recommended clusters and maximize Roma’s chance of winning.
+
+
+*Defenders:*
+
+
+```{r}
+
+
+############## Defenders #################
+
+
+rescale_defend_acm <- defend_acm %>%
+  select(-c(player_id, date, position)) %>%
+  scale()
+
+### Define the optimal K
+
+# Use map_dbl to run many models with varying value of k (centers)
+tot_withinss <- map_dbl(1:10,  function(k){
+  model <- kmeans(x = rescale_defend_acm, centers = k)
+  model$tot.withinss
+})
+
+# Generate a data frame containing both k and tot_withinss
+elbow_defend_acm <- data.frame(
+  k = 1:10,
+  tot_withinss = tot_withinss
+)
+
+# Plot the elbow plot
+ggplot(elbow_defend_acm, aes(x = k, y = tot_withinss)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:10)
+
+
+### train model based on apparent business sense
+set.seed(20)
+cluster_d_acm <- kmeans(rescale_defend_acm, 2)
+defend_acm$segments <- cluster_d_acm$cluster
+cluster1d_acm = defend_acm[defend_acm$segments==1,]
+cluster2d_acm = defend_acm[defend_acm$segments==2,]
+
+
+# Calculate the mean for each category
+cluster_def_A_res <- defend_acm %>% 
+  select(-c(player_id,date, position)) %>%
+  group_by(segments) %>% 
+  summarise_all(funs(mean(.)))
+
+
+```
+
+
+*Interpretation:*
+Following were identified as the relevant clusters for Attackers:
+
+**Centrebacks (group 2 from defender radar chart):** The primary responsibility of these players is to prevent opposition from scoring goals. They are tall, strong individuals who are very good at marking, intercepting, tackling, and heading the ball. However, their skillset is generally limited to these defensive attributes, and they are generally not very quick or creative when in possession of the football.
+Example of Roma players:
+
+**Fullbacks/Wingbacks (group 1 from the defender radar chart):** These players play a supporting role to centre backs while also providing width to attacks through overlapping runs. They are wide defenders, and are very good at crossing the ball. They also have a solid workrate, having to run up the pitch to support attacking moves and also falling back to support their defense.
+Example of Roma players:
+
+
+*Attackers:*
+
+
+```{r}
+
+############## Attackers #################
+
+
+rescale_attack_acm <- attack_acm %>%
+  select(-c(player_id, date, position)) %>%
+  scale()
+
+### Define the optimal K
+
+# Use map_dbl to run many models with varying value of k (centers)
+tot_withinss2 <- map_dbl(1:10,  function(k){
+  model2 <- kmeans(x = rescale_attack_acm, centers = k)
+  model2$tot.withinss
+})
+
+# Generate a data frame containing both k and tot_withinss
+elbow_attack_acm <- data.frame(
+  k = 1:10,
+  tot_withinss2 = tot_withinss2
+)
+
+# Plot the elbow plot
+ggplot(elbow_attack_acm, aes(x = k, y = tot_withinss2)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:10)
+
+
+### train model based on apparent business sense
+set.seed(20)
+cluster_a_acm <- kmeans(rescale_attack_acm, 5)
+attack_acm$segments <- cluster_a_acm$cluster
+cluster1a_acm = attack_acm[attack_acm$segments==1,]
+cluster2a_acm = attack_acm[attack_acm$segments==2,]
+cluster3a_acm = attack_acm[attack_acm$segments==3,]
+cluster4a_acm = attack_acm[attack_acm$segments==4,]
+cluster5a_acm = attack_acm[attack_acm$segments==5,]
+
+# Calculate the mean for each category
+cluster_atk_A_res <- attack_acm %>% 
+  select(-c(player_id,date, position)) %>%
+  group_by(segments) %>% 
+  summarise_all(funs(mean(.)))
+
+
+```
+
+*Interpretation:*
+Following were identified as the relevant clusters for Attackers:
+
+
+**Wide forwards (group 1 in attacker radar chart):** These players are lightning-quick, great dribblers and have the best balance among attackers belonging to other clusters. They add speed and width to a team’s attack, which stretches out opposition defences giving more space to strikers. Many of these forwards also possess great crossing ability.
+
+
+
+**Second-strikers (group 4 in attacker radar chart):** Unlike target-men, these individuals are mobile forwards with good technical ability (dribbling skills and ball control) and link-up play that only support out-and-out strikers in scoring goals, but can also create opportunities for other players, especially the wide forwards. Their excellent reactions, ball-control, vision (eye for a pass) and short-passing ability allows them to quickly pick-out passes thus creating opportunities for other teammates.
+
+
+
+**Target-man/out-and-out striker (group 5 in attacker radar chart):** These players are prolific goalscorers, known to be lethal in front of goal. What they lack in speed, they make up in strength and positioning. They are well-built, both in terms of weight and height, challenging defenders physically. Among all attacking clusters, they have the best heading accuracy, and are among the best at finishing.
+
+
+Visualization of attack player groups: 
+
+In order to demostrate the difference between positions, a radar chart is used to compare between group1 and group 5 in attacker. 
+
+```{r}
+
+
+## Attackers
+att_char_data = data.frame("crossing" = c(100,30,73,58),
+                           "finishing"=c(100,30,73,83),
+                           "heading_accuracy"=c(100,30,53,80),
+                           "short_passing"=c(100,30,75,70),
+                           "dribbling"=c(100,30,84,74),
+                           "ball_control"=c(100,30,83,80),
+                           "reactions"=c(100,30,75,78),
+                           "balance"=c(100,30,84,66),
+                           "strength"=c(100,30,53,79),
+                           "positioning"=c(100,30,76,84),
+                           "vision"=c(100,30,75,67),
+                           "Avg Speed"=c(100,30,86,75))
+rownames(att_char_data) = c("1","2","group A1","group A5")
+
+
+colors_border=c( rgb(0.2,0.5,0.5,0.9), rgb(0.8,0.2,0.5,0.9) )
+colors_in=c( rgb(0.2,0.5,0.5,0.4), rgb(0.8,0.2,0.5,0.4)  )
+
+
+# plot with default options:
+radarchart(att_char_data , axistype=1 , 
+            #custom polygon
+            pcol=colors_border , pfcol=colors_in , plwd=4 , plty=1,
+            #custom the grid
+            cglcol="grey", cglty=1, axislabcol="grey", caxislabels=seq(0,20,5), cglwd=0.8,
+            #custom labels
+            vlcex=0.8) 
+
+
+# Add a legend
+legend(x=1.5, y=1, legend = rownames(att_char_data[-c(1,2),]), bty = "n", pch=20 , col=colors_in , text.col = "grey", cex=1.2, pt.cex=3)
+
+
+```
+
+As shown on the radar chart, compared with group 5 attackers, group 1 attackers have a higher spped, vision and balance, and their driblling skills, passing skills and ball controls are slightly better. This shows the characteristic of wide forward players, who are fast on the side with good ball techniques. On the contrary, Group A5 performs better in terms of positioning, strength, positioning, finishing and heading accuracy, which fullfills the characteristic of a target-man/out-and-out striker. Although they are lack of speed and ball control skills, their strength, good positioning and finishing is a huge threat for the opponent. 
+
+
+*Mid-fielders:*
+
+
+```{r}
+
+
+###################### Mid-Fielders ########################
+
+
+
+rescale_mid_acm <- mid_acm %>%
+  select(-c(player_id, date, position)) %>%
+  scale()
+
+### Define the optimal K
+# Use map_dbl to run many models with varying value of k (centers)
+tot_withinss3 <- map_dbl(1:10,  function(k){
+  model3 <- kmeans(x = rescale_mid_acm, centers = k)
+  model3$tot.withinss
+})
+
+# Generate a data frame containing both k and tot_withinss
+elbow_mid_acm <- data.frame(
+  k = 1:10,
+  tot_withinss3 = tot_withinss3
+)
+
+# Plot the elbow plot
+ggplot(elbow_mid_acm, aes(x = k, y = tot_withinss3)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:10)
+
+
+### train model based on apparent business sense
+set.seed(20)
+cluster_m_acm <- kmeans(rescale_mid_acm, 8)
+mid_acm$segments <- cluster_m_acm$cluster
+cluster1m_acm = mid_acm[mid_acm$segments==1,]
+cluster2m_acm = mid_acm[mid_acm$segments==2,]
+cluster3m_acm = mid_acm[mid_acm$segments==3,]
+cluster4m_acm = mid_acm[mid_acm$segments==4,]
+cluster5m_acm = mid_acm[mid_acm$segments==5,]
+cluster6m_acm = mid_acm[mid_acm$segments==6,]
+cluster7m_acm = mid_acm[mid_acm$segments==7,]
+cluster8m_acm = mid_acm[mid_acm$segments==8,]
+
+
+# Calculate the mean for each category
+cluster_mid_A_res <- mid_acm %>% 
+  select(-c(player_id,date, position)) %>%
+  group_by(segments) %>% 
+  summarise_all(funs(mean(.)))
+
+
+```
+
+*Interpretation:*
+
+Following were identified as the relevant clusters for Mid-fielders:
+
+**Enforcers (group 2 in midfielder radar chart):** These players specialize in winning the ball back from the opposition early in midfield. They tend not to be as technically gifted as players from the other clusters, but make it up in their ability to intercept and tackle. They are strong, aggressive players that shield their team’s defensive line, and turn the ball to box-to-box midfielders or other attacking players further up the football pitch.
+
+
+**Box-to-box midfielders (group 4 in midfield radar chart):** These players are versatile midfielders possessing a very balanced skillset. They are the engine of a team, having a lot of stamina and constantly running. They are good at dribbling and have good ball control. Their role in the team is to facilitate speedy transition from defence to attack, while also supporting ‘enforcers’ in winning the ball back when the ball is not in their team’s possession.
+
+
+**Attacking midfielders (group 6 in midfield radar chart):** These players have a very special skill set, and are not as versatile as box-to-box midfielders. These players play behind the target man or second striker, and are largely responsible for creating opportunities. They have the best ball-control, vision and dribbling amongst other types of midfielders, and are quick too. They are generally more accurate with freekicks, and have high spatial awareness. Thus, they are very intelligent in terms of the positions they take up, exploiting little pockets of space from where they can play in the final pass to the strikers.
+
+
+# Descriptive Analysis of AS Roma and AC Milan Team Formations
+
+*Problem Description*
+
+Now that we have clustered Roma as well as other team players into relatively homogeneous segments, we need to establish how best to set our team up in terms of field positions. This is called the formation of the team, and it dictates the general structure of the team for a particular game.
+
+*Description and Rationale for the Chosen Analysis*
+
+To study the most common formations used by Roma and AC Milan, we used simple descriptive analysis and clear visualizations. We believe these to be more than sufficient in bringing out trends regarding current Roma and AC Milan team formation strategies. We determine the formation excluding the position of the goalkeeper as he has a default position for all teams across leagues.
+
+*Execution and Results*
+
+```{r}
+
+match_table <- match_tbl%>% collect()
+
+
+#DETERMINE FORMATION FOR HOME TEAM
+#Create temporary dataframe with only home team Y values
+
+temp <- match_table[c(1,34:44)]
+myvector1 <- c()
+#populate myvector with formations
+for(row in 1:nrow(temp)) {
+  i=1
+  sample_vector1 = c()
+  for(col in 3:ncol(temp)) {
+    sample_vector1[i] <- as.integer(temp[row, col]) #home
+    i = i+1
+  }
+  myvector1 <- append(myvector1,paste(array(table(sample_vector1)), collapse = ''))
+}
+
+#add a column "home_formation" in temp
+new_df1 <- data.frame(myvector1)
+match_table["home_formation"] <- new_df1["myvector1"]
+
+
+# Repeat the same exercise for Away team
+
+#DETERMINE FORMATION FOR AWAY TEAM
+#Create temporary dataframe with only away team Y values
+temp <- match_table[c(1,45:55)]
+
+
+#create an empty vector to hold the formation
+myvector1 <- c()
+
+#populate myvector with formations
+for(row in 1:nrow(temp)) {
+  i=1
+  sample_vector1 = c()
+  for(col in 3:ncol(temp)) {
+    sample_vector1[i] <- as.integer(temp[row, col])
+    i = i+1
+  }
+  myvector1 <- append(myvector1,paste(array(table(sample_vector1)), collapse = ''))
+}
+
+#add a column "away formation" in temp
+new_df1 <- data.frame(myvector1)
+match_table["away_formation"] <- new_df1["myvector1"]
+
+
+match_table['home_score'] = ifelse(match_table$home_team_result=='W',3, ifelse(match_table$home_team_result=='D',1,0 ) )
+match_table['away_score'] = ifelse(match_table$away_team_result=='W',3, ifelse(match_table$away_team_result=='D',1,0 ) )
+match_table <- subset(match_table, home_formation != '' & home_formation!='')
+match_table_with_result <- match_table
+
+match_table <- match_table[,c("league_id","home_team_api_id","away_team_api_id","home_formation","away_formation")]
+
+
+#Home team : Roma
+# Formation : 433 (70 matches), 4231(30 matches), 4312(30 matches)
+match_table %>% filter(home_team_api_id==roma_record$team_api_id)%>%
+  ggplot(., aes(x=home_formation, fill = "blue") ) + 
+  geom_histogram(stat="count",fill = "navyblue") +
+  theme(axis.text.x = element_text(angle=60, hjust=1),legend.position = "none") +
+  labs(x = "Home Formation for Roma", y = "Total Count",fill = "League Names")+
+  scale_fill_brewer(palette="Paired")+
+  ggtitle("Popular Formations Used by AS Roma for Home Fixtures")
+
+#Away team : Roma
+# Formation : 433 (30 matches), 352(25 matches), 4312 (23 matches)
+match_table %>% filter(home_team_api_id==roma_record$team_api_id)%>%
+  ggplot(., aes(x=away_formation, fill = "blue") ) + 
+  geom_histogram(stat="count",fill = "navyblue") +
+  theme(axis.text.x = element_text(angle=60, hjust=1),legend.position = "none")+
+  labs(x = "Away Formation for Roma", y = "Total Count",fill = "League Names")+
+  scale_fill_brewer(palette="Paired")+
+  ggtitle("Popular Formations Used by AS Roma for Away Fixtures")
+
+
+#Home team : ACM
+# Formation : 4312 (50 matches), 433 (40 matches)
+match_table %>% filter(home_team_api_id==acm_str_id)%>%
+  ggplot(., aes(x=home_formation,fill = "blue") ) + 
+  geom_histogram(stat="count",fill = "navyblue")+
+  theme(axis.text.x = element_text(angle=60, hjust=1),legend.position = "none")+
+  labs(x = "Home Formations for AC Milan", y = "Total Count",fill = "League Names")+
+  scale_fill_brewer(palette="Paired")+
+  ggtitle("Popular Formations Used by AC Milan for Home Fixtures")
+
+
+#Away team : ACM
+# Formation : 352 and 4312(25 matches), 433(25 matches), 442 (17 matches)
+match_table %>% filter(home_team_api_id==acm_str_id)%>%
+  ggplot(., aes(x=away_formation,fill = "blue") ) + 
+  geom_histogram(stat="count",fill = "navyblue")+
+  theme(axis.text.x = element_text(angle=60, hjust=1),legend.position = "none")+
+  labs(x = "Away Formations for AC Milan", y = "Total Count",fill = "League Names")+
+  scale_fill_brewer(palette="Paired")+
+  ggtitle("Popular Formations Used by AC Milan for Away Fixtures")
+```
+
+
+
+*Interpretation and Conclusion*
+
+Based on our analysis on formations, we observe that Roma’s frequent play formation is 4-3-3 and 4-3-1-2. Irrespective of whether the game is played in the home ground or away. We also observe that AC Milan has a tendency to use 4-3-3 and 4-3-1-2 in both home and away matches too. 
+
+However, to be more confident about formation and team strategy, we believe that we should expand the scope of analysis to also look at formations of other teams that managed to beat AC Milan.
+
+
+
+
+
+# Association Rule Analysis on the formation and player types 
+
+Our key question for this step is: What can we learn from these teams who are weaker than AC Milan but won the matches? It is highly likely that AC Milan players, overall, have a better skill set than their opponents, what are other factors that can compensate for the disadvantage of players’ abilities? 
+
+*Description and Rationale for the Chosen Analysis*
+ 
+We believe that the formation of the team revealed something about the strategy of the team, such as whether the team is pressuring mid-field or playing defensive counterback. In addition, after a team determines its playstyle, which player Roma should pick, or more generally, what types of players to pick. Association Rules algorithm is a good tool focusing on finding co-occurring associations in dataset. In this case, we believe that using association rule analysis would help us define non-obvious patterns of formation and playertypes combinations. Therefore, for every match, we put the formation of teams and player types of all winning team’s players, besides goalkeeper as our dataset for association rules mining. 
+
+
+
+## Data preparation for Association Rules
+
+We first matched every player to the playertypes(clusters created) they belong to. Then we subsetted the matches where AC Milan has lost(total: 26 matches). In order to find out the non-obvious patterns on the combination of team formation and playertypes, we added the formations of both teams used in those matches to the playertypes infomation. The output of this step is a dataset ready for performing Association Rules where the each row contains information of the formations of two teams and the playertypes assigned by the winning team.
+
+
+
+```{r include=FALSE}
+#Match every players in the target matches with their coresponding position types (clusters)
+# Split the dataset into three parts
+### Attack
+attack_acm_cluster = attack_acm %>%
+  select(player_id,segments)
+
+attack_unique_cluster = attack_acm_cluster %>%
+  group_by(player_id) %>%
+  top_n(1)
+
+attack_unique_cluster = distinct(attack_unique_cluster)
+attack_unique_cluster$position = "A"
+
+### Mid
+
+mid_acm_cluster = mid_acm %>%
+  select(player_id,segments)
+
+
+mid_unique_cluster = mid_acm_cluster %>%
+  group_by(player_id) %>%
+  top_n(1)
+
+mid_unique_cluster = distinct(mid_unique_cluster)
+mid_unique_cluster$position = "M"
+
+### Defense
+
+def_acm_cluster = defend_acm %>%
+  select(player_id,segments)
+
+def_unique_cluster = def_acm_cluster %>%
+  group_by(player_id) %>%
+  top_n(1)
+
+def_unique_cluster = distinct(def_unique_cluster)
+def_unique_cluster$position = "D"
+
+# Combine three clusters together
+win_acm_player_cluster = rbind(attack_unique_cluster,mid_unique_cluster,def_unique_cluster)
+# drop duplicated rows
+unique_player_position = win_acm_player_cluster[!duplicated(win_acm_player_cluster$player_id),]
+# 
+unique_player_position$postype <- paste(unique_player_position$position, unique_player_position$segments)
+unique_player_position = unique_player_position %>%
+  select(player_id,postype)
+view(unique_player_position)
+
+#write.csv(Juventus_loss_playerpos,"Juv_loss_with_player_position.csv",row.names = FALSE)
+acm_str_info <- filter(teams, team_long_name == 'Milan')
+acm_str_id <- acm_str_info$team_api_id
+str_info <- filter(teams, team_long_name %in% opposition_str$team_long_name)
+str_id <- str_info$team_api_id
+
+# Get matches of AC Milan where it lost
+acm_team_home_matches <- match_tbl %>% 
+  collect() %>%
+  filter(home_team_api_id == acm_str_id) %>%
+  mutate(res = ifelse(home_team_goal<away_team_goal, TRUE, FALSE)) %>%
+  filter(res == TRUE) %>%
+  select(match_api_id, ends_with('H'), ends_with('A'))
+
+acm_team_away_matches <- match_tbl %>% 
+  collect() %>%
+  filter(away_team_api_id == acm_str_id) %>%
+  mutate(res = ifelse(home_team_goal>away_team_goal, TRUE, FALSE)) %>%
+  filter(res == TRUE) %>%
+  select(match_api_id, ends_with('H'), ends_with('A'))
+
+
+# Calculate the average odds for each match, disregarding missing values
+acm_team_home_matches_h <- acm_team_home_matches %>% 
+  select(match_api_id, ends_with('H'))
+acm_team_home_matches_a <- acm_team_home_matches %>% 
+  select(match_api_id, ends_with('A'))
+acm_team_home_matches <- transform(acm_team_home_matches, 
+                                        H_odds = rowMeans(acm_team_home_matches_h[, -1], na.rm = TRUE),
+                                        A_odds = rowMeans(acm_team_home_matches_a[, -1], na.rm = TRUE))
+
+# Get matches where acm team were playing against its weaker teams
+acm_home_matches_ids <- acm_team_home_matches %>% 
+  filter(H_odds > A_odds) %>%
+  select(match_api_id)
+
+acm_team_away_matches_h <- acm_team_away_matches %>% 
+  select(match_api_id, ends_with('H'))
+acm_team_away_matches_a <- acm_team_away_matches %>% 
+  select(match_api_id, ends_with('A'))
+acm_team_away_matches <- transform(acm_team_away_matches, 
+                                        H_odds = rowMeans(acm_team_away_matches_h[, -1], na.rm = TRUE),
+                                        A_odds = rowMeans(acm_team_away_matches_a[, -1], na.rm = TRUE))
+
+acm_away_matches_ids <- acm_team_away_matches %>% 
+  filter(H_odds < A_odds) %>%
+  select(match_api_id)
+
+acm_matches_ids <- rbind(acm_home_matches_ids,acm_away_matches_ids) 
+
+acm_team_matches_lost <- match_tbl %>%
+  collect() %>%
+  filter(match_api_id %in% acm_matches_ids$match_api_id)
+
+home_matches <- match %>% 
+  filter(match_api_id %in% acm_home_matches_ids$match_api_id) %>%
+  select(match_api_id, matches('away_player_[[:digit:]]'))
+
+names(home_matches) <- c("match_api_id", as.character(c(1:11)))
+away_matches <- match %>% 
+  filter(match_api_id %in% acm_away_matches_ids$match_api_id) %>%
+  select(match_api_id, matches('home_player_[[:digit:]]'))
+names(away_matches) <- c("match_api_id", as.character(c(1:11)))
+real_matches <- rbind(home_matches, away_matches)
+
+players_in_26_matches <- gather(real_matches,match_api_id, player_id) 
+
+###### Add player type into matches where acmentus lost
+unique_player_position$player_id <- as.numeric(as.character(unique_player_position$player_id))
+players_26acm <- inner_join(players_in_26_matches, unique_player_position, by = 'player_id')
+players_26acm <- players_26acm %>% select(-match_api_id)
+
+unique_player_position = unique_player_position[!duplicated(unique_player_position$player_id),]
+acm_loss_home = acm_loss[acm_loss$home_team_api_id == acm_str_id,]
+acm_loss_home = acm_loss_home %>%
+  select (-c(home_player_1:home_player_11))
+
+new <- acm_loss_home %>%
+  select(match_api_id,away_player_2:away_player_11)
+
+new1 <- gather(new, players, player_id, -match_api_id)
+
+unique_player_position$player_id <- as.integer(unique_player_position$player_id)  
+new2 = left_join(new1,unique_player_position,by = "player_id")
+
+new3 = new2 %>% select(-player_id) 
+new3 = spread(new3,players, postype)
+
+
+acm_loss_home = acm_loss_home[order(acm_loss_home$match_api_id),]
+new3 = new3 %>%
+  select (match_api_id,away_player_2:away_player_9,away_player_10,away_player_11)
+
+acm_loss_home[,57:66]= new3[,2:11]
+
+acm_loss_away = acm_loss[acm_loss$away_team_api_id ==8564,]
+acm_loss_away = acm_loss_away %>%
+  select (-c(away_player_1:away_player_11))
+
+old <- acm_loss_away %>%
+  select(match_api_id,home_player_2:home_player_11)
+
+old1<- gather(old, players, player_id, -match_api_id)
+
+old2 = left_join(old1,unique_player_position,by = "player_id")
+
+old3 = old2 %>% select(-player_id) 
+old3 = spread(old3,players, postype)
+
+old3 = old3 %>%
+  select (match_api_id,home_player_2:home_player_9,home_player_10,home_player_11)
+
+acm_loss_away = acm_loss_away[order(acm_loss_away$match_api_id),]
+
+acm_loss_away[,57:66]= old3[,2:11]
+
+names(acm_loss_away)[56:66] = c("player1","player2","player3","player4","player5","player6"
+                                     ,"player7","player8","player9","player10","player11")
+
+names(acm_loss_home)[56:66] = c("player1","player2","player3","player4","player5","player6"
+                                     ,"player7","player8","player9","player10","player11")
+
+
+acm_loss_playerpos = rbind(acm_loss_home,acm_loss_away) 
+acm_loss_playerpos = acm_loss_playerpos %>%
+  select(c(match_api_id,player2:player11))
+
+```
+
+
+```{r include=FALSE}
+
+# Combine player postype info and team formation info for each match where AC Milan lost domestically
+# Get the formation info of matches where acm lost to weaker teams
+
+acm_loss_match_formation <- acm_loss %>% 
+  filter(match_api_id %in% real_matches$match_api_id) %>%                             select(match_api_id,home_formation:away_items)
+
+win_formation <- acm_loss_match_formation %>% filter(home_team_result == "W") %>% select(match_api_id, Win = home_items, Loss = away_items)
+loss_formation <- acm_loss_match_formation %>% filter(home_team_result != "W") %>% select(match_api_id, Win = away_items, Loss = home_items)
+acm_loss_match_formation <- rbind(win_formation, loss_formation)
+
+# Combine
+
+acm_info <- inner_join(acm_loss_match_formation, acm_loss_playerpos, by = "match_api_id")
+
+acm_info_for_AR <- acm_info %>% select(-match_api_id)
+
+colnames(acm_info_for_AR) <- NULL
+#write.csv(acm_info_for_AR, "ACM_26info_for_AR.csv",row.names = FALSE)
+
+```
+
+
+
+
+## Perform Associastion Rules 
+
+Get datasets ready for running Association Rules.
+
+```{r, warning= FALSE, message= FALSE, results= 'hide'}
+
+#Load matches as "transactions"
+matches = read.transactions("ACM_26info_for_AR.csv", format = "basket",
+                           sep = ",", rm.duplicates = TRUE)
+
+matches_formation <- acm_info_for_AR[,1:2]
+matches_postype <- acm_info_for_AR[,3:12]
+write.csv(matches_formation, "ACM_26matches_formation.csv", row.names = FALSE)
+write.csv(matches_postype, "ACM_26matches_postype.csv", row.names = FALSE)
+
+matches_formation = read.transactions("ACM_26matches_formation.csv", format = "basket",
+                           sep = ",", rm.duplicates = TRUE)
+matches_postype = read.transactions("ACM_26matches_postype.csv", format = "basket",
+                           sep = ",", rm.duplicates = TRUE)
+
+```
+
+Above we loaded three datasets ready for running Association Rules:
+
+**"matches_formation"** dataset contains only the formations of both teams for each match record; 
+
+**"matches_postype"** dataset contains only the playertypes of tne teams who won AC Milan for each match record;
+
+**"matches"** dataset contains formations of both teams and playertypes of tne teams who won AC Milan for each match record.
+
+
+
+
+### Apply Association Rules to Formation table
+
+In this section, we applied Association rules on the "match_formation" table to find out the most frequently used formations that the winning team used to win AC Milan.
+
+
+**A. Frequent formation used to win ACM **
+
+We first explore the frequencies of the formations that were frequently used by the winning teams and AC Milan in those target matches.
+
+```{r, warning= FALSE, message= FALSE, results= 'hide'}
+# Find the most frequently used formation
+itemFrequencyPlot(matches_formation, ylim = c(0, 1))
+# The abslute support count for each formation used
+itemFrequency(matches_formation, type = "absolute")
+```
+
+*Inerpretation:*
+
+We noticed that most teams that are weaker than AC Milan used 4312, 433, and 4231 formations to win AC Milan. And AC Milan lost mostly in those matches when using 4312 and 433 formations. Although AC Milan will use different formations for different matches, 4312 and 433 are two most common formations we suggest to focus on when designing the optimal winning strategies against AC Milan.
+
+
+
+**B. Which formation Roma should use when facing specific formation of AC Milan**
+
+We then apply Association rules on the "match_formation" table to find out which formation those winning teams use frequently when facing specific formation of AC Milan. Since we found out that 4312 and 433 are two most common formations in those matches AC Milan lost, we will use Association Rules to target these specific two formations respectively.
+
+**B-1:** When AC Milan is playing **4312 formation**
+
+```{r, warning= FALSE, message= FALSE, results= 'hide'}
+rules <- apriori(matches_formation, parameter = list(supp = 0.01, conf = 0.1 ))
+formation_res <- inspect(subset(rules, subset = lhs %in% "4312L")) %>% arrange(desc(count))
+```
+
+```{r, warning= FALSE, message= FALSE}
+formation_res
+```
+
+
+*Inerpretation:*
+
+From the result of Association rules, we found that the probability of winning teams using 4312 formation is 33% when AC Milan used 4312 formation lost, the probability of winning teams using 4231 formation is 22% when AC Milan used 4312 formation lost, and the probability of winning teams using 4333 formation is 22% when AC Milan used 4312 formation lost. Therefore, 4312, 4231, and 433 formation can be considered when playing against ACM's 4312 formation.
+
+
+**B-2:** When AC Milan is playing **433 formation**
+
+```{r, warning= FALSE, message= FALSE, results= 'hide'}
+rules <- apriori(matches_formation, parameter = list(supp = 0.01, conf = 0.1 ))
+formation_res <- inspect(subset(rules, subset = lhs %in% "433L")) %>% arrange(desc(count))
+
+```
+
+```{r, warning= FALSE, message= FALSE}
+formation_res
+```
+
+
+*Inerpretation:*
+
+From the result of Association rules, we found that the probability of winning teams using 4312 formation is 37% when AC Milan used 433 formation lost, and the probability of winning teams using 433 formation is 25% when AC Milan used 433 formation lost. Therefore, 4312, 433 can be considered when playing against ACM's 433 formation.
+
+
+**Conclusion** 
+
+From the results of the Association Rules on the targeted 2 formations AC Milan used respectively, we found that 4312, 433, and 4231 are three formations we could suggest Roma to consider using to win these 2 common AC Milan's formations. Since we found out that 4312 and 433 are two most common formations in those matches AC Milan lost, we will use Association Rules to target these specific two formations respectively. From previews analysis on Roma's frequently used formations, 4312 and 433 are within the most familiar formations for Roma. Therefore, we will next fucus on which types of players to suggest for Roma when Roma playing these 2 formations against AC Milan. 
+
+
+
+#### Apply Association Rules to both Formation and Playertypes
+
+From the previews analysis, we found that 4312 and 433 are the 2 target formations we suggest Roma to focus on when playing against AC Milan. In order to form a better strategy on the field, we also need to consider which types of players Roma should assign when playing those formations respectively. Hence, we next apply Association rules on the "matches" table to find out which types of players co-occurred frequently with the formations we specified.
+
+
+
+A. When considering playing **4312 formation** against AC Milan:
+
+
+```{r, warning= FALSE, message= FALSE, results= 'hide'}
+rules <- apriori(matches, parameter = list(supp = 0.1, conf = 1))
+both_res <- inspect(subset(rules, subset = lhs %in% "4312W")) %>% arrange(desc(count))
+```
+
+```{r, warning= FALSE, message= FALSE}
+both_res
+```
+
+
+*Inerpretation:*
+
+From the result of Association rules, we found that D1 and D2 almost co-occurred in all the matches when winning teams play 4312 formation, which is reasonable, since it requires 4 defenders in the 4312 formations and it usually needs two types of defenders to cooperate in the match. Given this, we would suggest Roma to use these two types of players(D1,D2) when playing 4312 formation. In terms of attackers and Mid-fielders, we found that Mid-fielder type 6 (M6), Attacker type 1 (A1), and Attacker type 5 (A5) co-occurred 100% when D1 or D2 is being used in the match. Therefore, we suggest Roma to consider using players who are identified as these 3 types of players when playing 4312 formation against AC Milan.
+
+
+
+B. When considering playing **433 formation** against AC Milan:
+
+
+```{r, warning= FALSE, message= FALSE, results= 'hide'}
+rules <- apriori(matches, parameter = list(supp = 0.1, conf = 1))
+both_res <- inspect(subset(rules, subset = lhs %in% "433W")) %>% arrange(desc(count))
+```
+
+
+```{r, warning= FALSE, message= FALSE}
+both_res
+```
+
+
+*Inerpretation:*
+
+From the result of Association rules, we also found that D1 and D2 almost co-occurred in all the matches when winning teams play 433 formation, which is reasonable as the same reason mentioned in the previews case. Given this, we would suggest Roma to use these two types of players(D1,D2) when playing 433 formation. In terms of attackers and Mid-fielders, we found that Mid-fielder type 2 (M2), Mid-fielder type 5 (M5), and Attacker type 5 (A5) co-occurred 100% when D1 or D2 is being assigned in the match. Therefore, we suggest Roma to consider using players who are identified as these 3 types of players when playing 433 formation against AC Milan.
+
+
+
+
+# Final Takeaways for Roma
+
+## What have we found?
+
+
+**Data preparation for roma player cluster prediction:**
+
+In order to give a more specific recommendation to AS Roma on which players to assign, we use the clustering model built to predict which clusters Roma's current players belong to (based on each position: Defender, mid-fielder, attacker). Considering Roma is having a different playerbase, we [searched](https://en.wikipedia.org/wiki/2016–17_A.S._Roma_season) and gathered all the players' information who are active in the most recent years (2016 and 2017) to offer a more realistic player assignment suggestion.(Since one player can have multiple roles during years of matches, we counted the most frequently played role for each player). This dataset is stored as a csv file call "Roma_16_17_players".
+
+
+
+**Summarzing strategies of each formation for Roma:**
+
+1. When Roma is considering using 4312 formation: M6,A1,A5
+
+```{r}
+
+# Find all the players in Roma that's suggested for 433 and 4312 formations
+roma_16_17_player <- read.csv('Roma_16_17_players.csv')
+Roma_players_4312 <- roma_16_17_player  %>%
+  mutate(Matches_played = Freq) %>%
+  select(-c('X','X.1', 'player_fifa_api_id','id','Freq', 'birthday','Matches_played')) %>%
+  filter(player_type %in% c('A-1','A-5','M-6'))
+
+Roma_players_4312
+```
+
+*Inerpretation:*
+
+According to Roma’s current squad, Daniele De Rossi and Juan Manuel Iturbe would be the recommended players if Roma is playing 4-3-1-2 against AC Milan based on their player types (group 6 in midfield and group  5 in attack). In addition, a group 1 attack player is needed, but there are a few players who are all recognized as this type of players. Based on the interpretation from the radar chart, these players are wide forwards who are lightning-quick and great dribblers with great crossing ability. Therefore, these skills are compared among group1 attack players in Roma (we exclude Alessandro Florenzi since he normally plays midfielder or fullback),  and we are looking for players that have a relatively high and balanced skill set as the recommended candidate.
+
+
+```{r}
+
+roma_a1_id = c(15403,30714,161328,292462)
+
+roma_a1_player = player_atts %>%
+  filter(player_api_id %in% roma_a1_id)
+
+roma_a1_player_atts = roma_a1_player %>%
+  group_by(player_api_id) %>%
+  summarise_at(vars("sprint_speed","crossing","dribbling"),mean)
+
+roma_a1_player_atts$player_api_id = as.factor(roma_a1_player_atts$player_api_id)
+roma_a1_player_atts$player_api_id = c("Edin Dzeko","Totti","Stephan Shaarawy","Salah")
+
+attributes <- c("sprint_speed","crossing","dribbling")
+
+mydata <- melt(roma_a1_player_atts,id.vars="player_api_id",variable.name="players",value.name="score")
+
+ggplot(mydata,aes(player_api_id,score,fill=players))+
+  geom_bar(stat="identity",position="dodge") + 
+  scale_fill_manual(values = c( "deepskyblue","dodgerblue", "dodgerblue3"))
+
+```
+
+*Inerpretation:*
+
+From the plot above, notice that Totti has a high score in crossing and dribbling, but his speed could be an disadvantage as a wide forward. Also, Salah receives the highest score in speed and dribbling, but his crossing score is the lowest among these players. Then, comparing the remaining two players (EdinDzeko and Stephan Shaarwy) who have a more balanced skillset, Stephan outscored Edin in all three skills. From a perspective of a more balanced and more skilled wide forward, Stephan Shaarawy would be the recommended player. 
+
+
+2. When Roma is considering using 433 formation: 
+
+```{r}
+
+# Find all the players in Roma that's suggested for 433 and 4312 formations
+player = c(1,2,4,5,7,8)
+Roma_players_433 <- roma_16_17_player  %>%
+  mutate(Matches_played = Freq) %>%
+  select(-c('X','X.1', 'player_fifa_api_id','id','Freq', 'birthday','Matches_played')) %>%
+  filter(player_type %in% c('A-5','M-2','M-4'))
+Roma_players_433 = Roma_players_433[player,]
+
+Roma_players_433
+
+```
+
+*Inerpretation:*
+
+Juan Manuel Iturbe (group 5 in attack) would be the recommended player when Roma is playing 4-3-3 against AC Milan. Radja Nainggolan and Kevin Stroot man are classified as group 2 in midfield, which is recognized as enforcers. They play a role in winning the ball back from the opposition early in midfield. A strong enforcer is someone who plays aggressively with great skills in interception, tackle and stamina to shield team’s defensive line. 
+
+
+```{r}
+roma_m2_id = c(41433,114558)
+
+roma_m2_player = player_atts %>%
+  filter(player_api_id %in% roma_m2_id)
+
+roma_m2_player_atts = roma_m2_player %>%
+  group_by(player_api_id) %>%
+  summarise_at(vars("interceptions","stamina","sliding_tackle"),mean)
+
+roma_m2_player_atts$player_api_id = as.factor(roma_m2_player_atts$player_api_id)
+roma_m2_player_atts$player_api_id = c("Radja Nainggolan","Kevin Strootman")
+
+attributes <- c("interceptions","stamina","tackles")
+
+
+mydata <- melt(roma_m2_player_atts,id.vars="player_api_id",variable.name="players",value.name="score")
+
+ggplot(mydata,aes(player_api_id,score,fill=players))+
+  geom_bar(stat="identity",position="dodge") + 
+  scale_fill_manual(values = c( "deepskyblue","dodgerblue", "dodgerblue3"))
+
+```
+
+
+*Inerpretation:*
+
+Although both players have a relatively balanced skill set in interception, stamina and tackles, Radja Naingolan is slightly preferred since he outscores Kevin Strootman in all three attributes that we are interested in. 
+
+
+Lastly, the box-to-box midfielders (group 4 in midfield). These players are the engine of the team who are good at dribbling, passing with great vision on the field. Three players (Francesco Totti, Leandro Daniel Paredes and Alessandro Florenzi) show up in this position, and their skill sets are compared below. 
+
+```{r}
+roma_m4_id = c(30714,237606,264842)
+
+roma_m4_player = player_atts %>%
+  filter(player_api_id %in% roma_m4_id)
+
+roma_m4_player_atts = roma_m4_player %>%
+  group_by(player_api_id) %>%
+  summarise_at(vars("dribbling","short_passing","long_passing","vision"),mean)
+
+roma_m4_player_atts$player_api_id = as.factor(roma_m4_player_atts$player_api_id)
+roma_m4_player_atts$player_api_id = c("Francesco Totti", "Leandro Daniel Paredes"," Alessandro Florenzi")
+
+attributes <- c("dribbling","short_passing","long_passing","vision")
+
+
+mydata <- melt(roma_m4_player_atts,id.vars="player_api_id",variable.name="players",value.name="score")
+
+ggplot(mydata,aes(player_api_id,score,fill=players))+
+  geom_bar(stat="identity",position="dodge") + 
+  scale_fill_manual(values = c( "deepskyblue","dodgerblue", "dodgerblue3","dark blue"))
+
+```
+
+*Inerpretation:*
+
+According to the plot, it is apparent that Francesco Totti is the desired player for the box-to-box midfielder. He outscored the other two players in every attribute that we compare. In addition, he joined in Roma in 1992 and already stayed for 25 years. He would be very familiar with the play-style that Roma typically play. 
+
+## Final Recommendation
+
+By performing association rules, we recognize a few formations AC Milan used to play, and we recommend a few formations that commonly beat AC Milan. Two of the most common winning formations (4-2-3-1 and 4-3-3) happen to be the common formation Roma is currently playing. Then, for each formation, we recommend some players based on their position and types from the cluster. In addition, for players with similar play style, we evaluate their attributes in different matches and pick the player with a higher and balanced skill set. 
+
+To be specific, if Roma decides to play 4-3-1-2 against AC Milan’s 4-3-3, we would recommend De Rossi as attack midfielder and Juan Manuel Iturbe as the target man. In addition, for the wide forward, Stephan Shaarawy is the preferred player than Edin Dzeko and Salah, as it has a more balanced skill set and is good at crossing. Although this is not the recommendation for every player in Roma, this could be used as a suggestion for key positions and key players for a particular formation. 
+
+Finally, due to AC Milan’s overall good performance in the Italian Series A, we do not find a lot of matches (in total of 26 matches) where they are beaten by a weak team. In order to get more information and make more informed recommendations about our opponent, we will need to collect more matches not only from the domestic league, but from the continential league, like the European championship as well.
+
+
